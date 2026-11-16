@@ -84,6 +84,20 @@ add_action( 'init', function (): void {
 			]
 		);
 	}
+
+	foreach ( [ '_skduo_phone' => 'skduo_sanitize_phone', '_skduo_email' => 'skduo_sanitize_contact_email' ] as $meta_key => $sanitize ) {
+		register_post_meta(
+			'treeninggrupp',
+			$meta_key,
+			[
+				'type'              => 'string',
+				'single'            => true,
+				'show_in_rest'      => true,
+				'sanitize_callback' => $sanitize,
+				'auth_callback'     => fn() => current_user_can( 'edit_posts' ),
+			]
+		);
+	}
 } );
 
 add_action( 'add_meta_boxes', function (): void {
@@ -156,8 +170,10 @@ function skduo_render_training_group_meta_box( WP_Post $post ): void {
 
 	$fields = [
 		'age_group' => [ 'Vanusegrupp', 'text', 'U-14 tüdrukud (2012-2013)' ],
-		'schedule'  => [ 'Treeningajad', 'textarea', 'Üks treeningaeg rea kohta.' ],
-		'contact'   => [ 'Kontakt', 'textarea', 'Üks kontaktirea kohta.' ],
+		'schedule'    => [ __( 'Treeningajad', 'skduo' ), 'textarea', __( 'Üks treeningaeg rea kohta.', 'skduo' ) ],
+		'skduo_phone' => [ __( 'Kontakttelefon', 'skduo' ), 'tel', '+372 5555 5555' ],
+		'skduo_email' => [ __( 'Kontakt e-post', 'skduo' ), 'email', 'treener@skduo.ee' ],
+		'contact'     => [ __( 'Lisainfo', 'skduo' ), 'textarea', __( 'Vabatekst, üks rida rea kohta. Kui telefon või e-post on tühi, loetakse need siit.', 'skduo' ) ],
 	];
 
 	foreach ( $fields as $key => [ $label, $type, $placeholder ] ) {
@@ -220,6 +236,13 @@ add_action( 'save_post_treeninggrupp', function ( int $post_id ): void {
 
 	update_post_meta( $post_id, '_coach_id', isset( $_POST['skduo_coach_id'] ) ? absint( $_POST['skduo_coach_id'] ) : 0 );
 
+	if ( isset( $_POST['skduo_skduo_phone'] ) ) {
+		update_post_meta( $post_id, '_skduo_phone', skduo_sanitize_phone( wp_unslash( $_POST['skduo_skduo_phone'] ) ) );
+	}
+	if ( isset( $_POST['skduo_skduo_email'] ) ) {
+		update_post_meta( $post_id, '_skduo_email', skduo_sanitize_contact_email( wp_unslash( $_POST['skduo_skduo_email'] ) ) );
+	}
+
 	foreach ( [ 'age_group', 'schedule', 'contact' ] as $key ) {
 		if ( ! isset( $_POST[ 'skduo_' . $key ] ) ) {
 			continue;
@@ -231,3 +254,158 @@ add_action( 'save_post_treeninggrupp', function ( int $post_id ): void {
 		update_post_meta( $post_id, '_' . $key, $value );
 	}
 } );
+
+// Coach names and group contacts feed the cached /noored list. Runs without the
+// nonce check so quick edit, trash and REST saves also refresh the cache.
+add_action( 'save_post_treener', 'skduo_flush_training_groups_cache' );
+add_action( 'save_post_treeninggrupp', 'skduo_flush_training_groups_cache' );
+add_action( 'deleted_post', function ( int $post_id ): void {
+	if ( in_array( get_post_type( $post_id ), [ 'treener', 'treeninggrupp' ], true ) ) {
+		skduo_flush_training_groups_cache();
+	}
+} );
+
+function skduo_flush_training_groups_cache(): void {
+	delete_transient( 'skduo_training_groups' );
+}
+
+/**
+ * Phone: keep digits, "+" and single spaces only.
+ */
+function skduo_sanitize_phone( $value ): string {
+	$value = preg_replace( '/[^\d+\s]/', '', (string) $value );
+
+	return trim( (string) preg_replace( '/\s+/', ' ', (string) $value ) );
+}
+
+function skduo_sanitize_contact_email( $value ): string {
+	$email = sanitize_email( (string) $value );
+
+	return is_email( $email ) ? $email : '';
+}
+
+/**
+ * tel: href with spaces and separators removed; a leading "+" (e.g. +372) is kept as is.
+ */
+function skduo_phone_href( string $phone ): string {
+	$digits = preg_replace( '/[^\d+]/', '', $phone );
+
+	return '' !== $digits ? 'tel:' . $digits : '';
+}
+
+/**
+ * Parse legacy free-text contact lines ("Label: value") into phone, email and extra lines.
+ * The first email and first phone found become structured values; other lines stay text.
+ *
+ * @param string|array $lines
+ * @return array{phone: string, email: string, extra: string[]}
+ */
+function skduo_parse_contact_lines( $lines ): array {
+	if ( ! is_array( $lines ) ) {
+		$lines = preg_split( '/\R+/', (string) $lines ) ?: [];
+	}
+
+	$result = [ 'phone' => '', 'email' => '', 'extra' => [] ];
+
+	foreach ( $lines as $line ) {
+		$line = trim( (string) $line );
+		if ( '' === $line ) {
+			continue;
+		}
+
+		if ( '' === $result['email'] && preg_match( '/[^\s@:]+@[^\s@]+\.[^\s@]+/u', $line, $m ) && is_email( $m[0] ) ) {
+			$result['email'] = $m[0];
+			continue;
+		}
+
+		if ( '' === $result['phone'] && preg_match( '/\+?\d[\d\s-]{5,}\d/', $line, $m ) ) {
+			$result['phone'] = skduo_sanitize_phone( $m[0] );
+			continue;
+		}
+
+		$value             = trim( (string) preg_replace( '/^[^:]{1,20}:\s*/u', '', $line ) );
+		$result['extra'][] = '' !== $value ? $value : $line;
+	}
+
+	return $result;
+}
+
+/**
+ * Contact for one training group: structured fields first, legacy free text as fallback.
+ *
+ * @return array{phone: string, phone_href: string, email: string, extra: string[]}
+ */
+function skduo_training_group_contact( int $post_id ): array {
+	$parsed = skduo_parse_contact_lines( (string) get_post_meta( $post_id, '_contact', true ) );
+	$phone  = skduo_sanitize_phone( (string) get_post_meta( $post_id, '_skduo_phone', true ) );
+	$email  = skduo_sanitize_contact_email( (string) get_post_meta( $post_id, '_skduo_email', true ) );
+
+	// Structured fields win; the free-text phone/email is then ignored (it stays in "Lisainfo" in admin).
+	$phone = '' !== $phone ? $phone : $parsed['phone'];
+	$email = '' !== $email ? $email : $parsed['email'];
+
+	return [
+		'phone'      => $phone,
+		'phone_href' => skduo_phone_href( $phone ),
+		'email'      => $email,
+		'extra'      => array_values( array_unique( $parsed['extra'] ) ),
+	];
+}
+
+/**
+ * Published training groups grouped by coach, for the /noored coach panels.
+ *
+ * @return array<int, array{coach: string, groups: array, contact: array}>
+ */
+function skduo_get_training_groups(): array {
+	$cached = get_transient( 'skduo_training_groups' );
+	if ( is_array( $cached ) ) {
+		return $cached;
+	}
+
+	$posts = get_posts( [
+		'post_type'      => 'treeninggrupp',
+		'post_status'    => 'publish',
+		'posts_per_page' => -1,
+		'orderby'        => [ 'menu_order' => 'ASC', 'title' => 'ASC' ],
+		'no_found_rows'  => true,
+	] );
+
+	$coaches = [];
+	foreach ( $posts as $post ) {
+		$coach_id   = (int) get_post_meta( $post->ID, '_coach_id', true );
+		$coach_name = $coach_id ? get_the_title( $coach_id ) : __( 'Treener täpsustamisel', 'skduo' );
+		$key        = $coach_id ?: 'coach-' . sanitize_title( $coach_name );
+
+		if ( ! isset( $coaches[ $key ] ) ) {
+			$coaches[ $key ] = [
+				'coach'   => $coach_name,
+				'groups'  => [],
+				'contact' => [ 'phone' => '', 'phone_href' => '', 'email' => '', 'extra' => [] ],
+			];
+		}
+
+		$coaches[ $key ]['groups'][] = [
+			'title' => (string) get_post_meta( $post->ID, '_age_group', true ) ?: get_the_title( $post ),
+			'times' => array_values( array_filter( preg_split( '/\R+/', (string) get_post_meta( $post->ID, '_schedule', true ) ) ?: [] ) ),
+		];
+
+		// One contact per coach panel: first phone/email found across the coach's groups.
+		$contact = skduo_training_group_contact( $post->ID );
+		$current = $coaches[ $key ]['contact'];
+		if ( '' === $current['phone'] && '' !== $contact['phone'] ) {
+			$current['phone']      = $contact['phone'];
+			$current['phone_href'] = $contact['phone_href'];
+		}
+		if ( '' === $current['email'] && '' !== $contact['email'] ) {
+			$current['email'] = $contact['email'];
+		}
+		$current['extra']             = array_values( array_unique( array_merge( $current['extra'], $contact['extra'] ) ) );
+		$coaches[ $key ]['contact'] = $current;
+	}
+
+	$coaches = array_values( $coaches );
+	set_transient( 'skduo_training_groups', $coaches, HOUR_IN_SECONDS );
+
+	return $coaches;
+}

@@ -2,7 +2,7 @@
 /**
  * Plugin Name: SK DUO Core
  * Description: Core content types, data helpers, and REST API endpoints for the SK DUO website.
- * Version: 1.0.9
+ * Version: 1.0.10
  * Author: Aleksander Eerma
  * Author URI: https://alexeerma.ee/
  * Text Domain: skduo
@@ -10,7 +10,7 @@
 
 defined( 'ABSPATH' ) || exit;
 
-define( 'SKDUO_CORE_VERSION', '1.0.9' );
+define( 'SKDUO_CORE_VERSION', '1.0.10' );
 define( 'SKDUO_CORE_PATH', plugin_dir_path( __FILE__ ) );
 
 function skduo_core_load_files(): void {
