@@ -23,6 +23,7 @@ function skduo_core_load_files(): void {
 		'includes/cpt-noored.php',
 		'includes/cpt-toetaja.php',
 		'includes/rest-api.php',
+		'includes/seo-schema.php',
 		'includes/dataproject-security.php',
 		'includes/dataproject.php',
 		'includes/dataproject-admin.php',
