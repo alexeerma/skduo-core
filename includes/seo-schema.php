@@ -41,11 +41,16 @@ function skduo_match_event_schema( WP_Post $post ): ?array {
 	$away = '' !== $match->away ? $match->away : '';
 	$name = ( '' !== $home && '' !== $away ) ? $home . ' vs ' . $away : $match->title;
 
+	// Volleyball matches have no fixed length; ~2 h covers a five-set match.
+	$duration = max( 30, (int) apply_filters( 'skduo_match_duration_minutes', 120, $post ) );
+	$end      = $start->modify( '+' . $duration . ' minutes' );
+
 	$event = [
 		'@type'               => 'SportsEvent',
 		'name'                => $name,
 		'url'                 => $match->permalink,
 		'startDate'           => $start->format( 'c' ),
+		'endDate'             => $end->format( 'c' ),
 		'eventStatus'         => 'https://schema.org/EventScheduled',
 		'eventAttendanceMode' => 'https://schema.org/OfflineEventAttendanceMode',
 		'sport'               => 'Volleyball',
@@ -64,27 +69,54 @@ function skduo_match_event_schema( WP_Post $post ): ?array {
 		];
 	}
 
+	$teams = [];
+
 	if ( '' !== $home ) {
 		$event['homeTeam'] = [ '@type' => 'SportsTeam', 'name' => $home ];
+		$teams[]           = $event['homeTeam'];
 	}
 
 	if ( '' !== $away ) {
 		$event['awayTeam'] = [ '@type' => 'SportsTeam', 'name' => $away ];
+		$teams[]           = $event['awayTeam'];
 	}
 
-	$image = get_the_post_thumbnail_url( $post, 'large' );
-	if ( $image ) {
-		$event['image'] = $image;
+	if ( $teams ) {
+		$event['performer'] = $teams;
 	}
+
+	// Match photo first, then a site-wide default supplied by the theme.
+	$image = get_the_post_thumbnail_url( $post, 'large' );
+	if ( ! $image ) {
+		$image = (string) apply_filters( 'skduo_schema_default_image', '', $post );
+	}
+	if ( $image ) {
+		$event['image'] = [ $image ];
+	}
+
+	// Offers are valid from publication, never later than kick-off.
+	$published  = get_post_datetime( $post, 'date' );
+	$valid_from = ( $published && $published < $start ) ? $published : $start;
+
+	$offer = [
+		'@type'        => 'Offer',
+		'availability' => 'https://schema.org/InStock',
+		'validFrom'    => $valid_from->format( 'c' ),
+	];
 
 	if ( $match->free_entry ) {
 		$event['isAccessibleForFree'] = true;
-	} elseif ( '' !== $match->ticket_url ) {
-		$event['offers'] = [
-			'@type'        => 'Offer',
-			'url'          => $match->ticket_url,
-			'availability' => 'https://schema.org/InStock',
+		$event['offers']              = $offer + [
+			'url'           => $match->permalink,
+			'price'         => '0',
+			'priceCurrency' => 'EUR',
 		];
+	} else {
+		$ticket_url = '' !== $match->ticket_url
+			? $match->ticket_url
+			: (string) apply_filters( 'skduo_schema_ticket_url', $match->permalink, $post );
+
+		$event['offers'] = $offer + [ 'url' => $ticket_url ];
 	}
 
 	return (array) apply_filters( 'skduo_match_event_schema', $event, $post, $match );
